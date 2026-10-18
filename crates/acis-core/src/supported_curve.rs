@@ -201,7 +201,7 @@ pub(crate) fn decode(
     if (start == 14) != (kind == "par_int_cur") {
         return Err("unqualified supported curve owner".into());
     }
-    r.int(22601)?;
+    r.embedded_version()?;
     r.int(0)?;
     r.word("nubs")?;
     r.int(3)?;
@@ -307,14 +307,7 @@ pub(crate) fn decode_with_model(
     table: &SubtypeTable,
     index: usize,
 ) -> Result<Option<SupportedCurve>, String> {
-    if model
-        .metadata()
-        .save_version
-        .as_ref()
-        .map(ToString::to_string)
-        .as_deref()
-        != Some("22700")
-    {
+    if !crate::qualified_model(model) {
         return Ok(None);
     }
     let raw = model

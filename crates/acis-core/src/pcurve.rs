@@ -70,14 +70,7 @@ pub(crate) fn decode_spline(
     index: usize,
     surface: usize,
 ) -> Result<Option<SplineSurfacePcurve>, String> {
-    if model
-        .metadata()
-        .save_version
-        .as_ref()
-        .map(ToString::to_string)
-        .as_deref()
-        != Some("22700")
-    {
+    if !crate::qualified_model(model) {
         return Ok(None);
     }
     let raw = model.entities().get(index).ok_or("missing pcurve")?.raw();
@@ -193,14 +186,7 @@ pub(crate) fn decode(
     index: usize,
     surface: usize,
 ) -> Result<Option<LinearSurfacePcurve>, String> {
-    if model
-        .metadata()
-        .save_version
-        .as_ref()
-        .map(ToString::to_string)
-        .as_deref()
-        != Some("22700")
-    {
+    if !crate::qualified_model(model) {
         return Ok(None);
     }
     let raw = model.entities().get(index).ok_or("missing pcurve")?.raw();

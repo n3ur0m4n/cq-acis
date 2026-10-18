@@ -749,6 +749,22 @@ fn decode(r: &mut Reader<'_>, raw: RawEntity) -> Result<Option<Entity>> {
             u_range: r.range()?,
             v_range: r.range()?,
         }),
+        "transform" if !matches!(r.tokens.get(r.pos).map(|t| &t.value), Some(Value::Text(_))) => {
+            // Binary form: three matrix rows and the translation as vectors, scale, rotate/reflect/shear.
+            let mut matrix_values = [0.0; 12];
+            for row in 0..4 {
+                let v = r.vector()?;
+                matrix_values[row * 3..row * 3 + 3].copy_from_slice(&[v.x, v.y, v.z]);
+            }
+            Entity::Transform(TransformEntity {
+                raw,
+                matrix_values,
+                scale: r.number()?,
+                rotated: r.boolean()?,
+                reflected: r.boolean()?,
+                sheared: r.boolean()?,
+            })
+        }
         "transform" => {
             let text = r.text()?;
             let words = text.split_whitespace().collect::<Vec<_>>();

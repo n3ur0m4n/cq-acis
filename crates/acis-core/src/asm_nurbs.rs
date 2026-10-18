@@ -51,6 +51,13 @@ impl Reader<'_> {
             Err("unqualified ASM spline field".into())
         }
     }
+    pub(crate) fn embedded_version(&mut self) -> Result<(), String> {
+        if crate::qualified_embedded_version(self.integer()?) {
+            Ok(())
+        } else {
+            Err("unqualified embedded subtype version".into())
+        }
+    }
     pub(crate) fn number(&mut self) -> Result<f64, String> {
         let v = match self.take()? {
             AcisValue::Float(v) => *v,
@@ -135,13 +142,22 @@ impl Reader<'_> {
         Ok((poles, weights))
     }
     fn discontinuities(&mut self, knots: &[f64]) -> Result<(), String> {
-        // Only empty first/second derivative lists and the complete list of
-        // interior knot breaks have been qualified in this explicit profile.
-        self.int(0)?;
-        self.int(0)?;
-        self.int(knots.len() - 2)?;
-        for &k in &knots[1..knots.len() - 1] {
-            self.scalar(k)?;
+        // First/second/third derivative break lists. They carry no geometry: AutoCAD 22300 files list
+        // only some interior knots, so any increasing subset of the interior knots is admitted.
+        let interior = &knots[1..knots.len() - 1];
+        for _ in 0..3 {
+            let count = self.integer()?;
+            if count > interior.len() {
+                return Err("unqualified discontinuity list".into());
+            }
+            let mut last = f64::NEG_INFINITY;
+            for _ in 0..count {
+                let k = self.number()?;
+                if k <= last || !interior.contains(&k) {
+                    return Err("unqualified discontinuity list".into());
+                }
+                last = k;
+            }
         }
         Ok(())
     }
@@ -156,7 +172,7 @@ impl Reader<'_> {
 }
 
 pub(crate) fn decode(raw: &RawEntity, save_version: u32) -> Result<Option<Entity>, String> {
-    if save_version != 22700 {
+    if !crate::qualified_save_version(save_version) {
         return Ok(None);
     }
     let kind = match (raw.type_name.as_str(), raw.values.get(3)) {
@@ -172,14 +188,19 @@ pub(crate) fn decode(raw: &RawEntity, save_version: u32) -> Result<Option<Entity
         AcisValue::Reference(v) => *v,
         _ => return Err("invalid spline pattern".into()),
     };
-    r.byte(0x0b)?; // Forward only; reversed parameter charts remain raw.
+    // The sense flag reverses the surface normal only; the UV chart is unchanged. Curves stay forward-only.
+    let reversed = match r.take()? {
+        AcisValue::Bytes(v) if v == &[0x0b] => false,
+        AcisValue::Bytes(v) if v == &[0x0a] && kind == 2 => true,
+        _ => return Err("explicit ASM spline expected tag 11".into()),
+    };
     r.byte(0x0f)?;
     r.word(if kind == 1 {
         "exact_int_cur"
     } else {
         "exact_spl_sur"
     })?;
-    r.int(22601)?;
+    r.embedded_version()?;
     r.int(0)?; // Embedded profile and full representation.
     let rational = match r.take()? {
         AcisValue::String(s) if s == "nubs" => false,
@@ -220,9 +241,14 @@ pub(crate) fn decode(raw: &RawEntity, save_version: u32) -> Result<Option<Entity
         Entity::BSplineCurve(curve)
     } else {
         let vd = r.integer()?;
-        for _ in 0..4 {
-            r.int(0)?;
-        } // Open/open and no U/V singularities.
+        r.int(0)?;
+        r.int(0)?; // Open/open.
+                   // U/V singularity: 0 none, 1 a collapsed boundary (same poles, same evaluation).
+        for _ in 0..2 {
+            if r.integer()? > 1 {
+                return Err("unqualified ASM spline field".into());
+            }
+        }
         let un = r.integer()?;
         let vn = r.integer()?;
         let (u_knots, u_multiplicities, u_count) = r.knots(ud, un)?;
@@ -257,7 +283,7 @@ pub(crate) fn decode(raw: &RawEntity, save_version: u32) -> Result<Option<Entity
             v_count,
             poles,
             weights,
-            reversed: false,
+            reversed,
             u_range,
             v_range,
             fit_tolerance: 0.,
@@ -362,8 +388,9 @@ mod tests {
             assert!(decode(&changed, 22700).is_err());
         }
         for (pos, value) in [
-            (1, AcisValue::Bytes(vec![10])),
             (4, AcisValue::Integer(22602.into())),
+            (9, AcisValue::Integer(1.into())),
+            (11, AcisValue::Integer(2.into())),
         ] {
             let mut changed = raw.clone();
             changed.values[pos] = value;
@@ -372,5 +399,78 @@ mod tests {
         let mut changed = raw;
         changed.values.push(AcisValue::Integer(0.into()));
         assert!(decode(&changed, 22700).is_err());
+    }
+
+    fn cubic_curve(breaks: &[f64]) -> RawEntity {
+        use AcisValue::{Bytes as B, Float as F, Integer as I, String as S};
+        let mut raw = RawEntity::new(3, "intcurve-curve");
+        raw.values = vec![
+            AcisValue::Reference(crate::NULL_REF),
+            B(vec![11]),
+            B(vec![15]),
+            S("exact_int_cur".into()),
+            I(23100.into()),
+            I(0.into()),
+            S("nubs".into()),
+            I(3.into()),
+            I(0.into()),
+            I(5.into()),
+        ];
+        for (k, m) in [(0., 3), (0.25, 1), (0.5, 1), (0.75, 1), (1., 3)] {
+            raw.values.extend([F(k), I(m.into())]);
+        }
+        for i in 0..7 {
+            raw.values.extend([F(i as f64), F((i * i) as f64), F(0.)]);
+        }
+        raw.values.push(F(0.));
+        for w in ["null_surface", "null_surface", "nullbs", "nullbs"] {
+            raw.values.push(S(w.into()));
+        }
+        raw.values
+            .extend([B(vec![11]), B(vec![11]), I(0.into()), I(0.into())]);
+        raw.values.push(I(breaks.len().into()));
+        raw.values.extend(breaks.iter().map(|b| F(*b)));
+        raw.values
+            .extend([I(0.into()), B(vec![10]), F(1.), B(vec![10]), F(0.)]);
+        raw.values.extend([I(0.into()), I(0.into()), B(vec![16])]);
+        raw.values.extend([B(vec![10]), F(0.), B(vec![10]), F(1.)]);
+        raw
+    }
+
+    #[test]
+    fn discontinuity_lists_may_hold_a_subset_of_interior_knots() {
+        // AutoCAD 22300 files list only some interior knots as third-derivative breaks.
+        for breaks in [&[0.25, 0.5, 0.75][..], &[0.5], &[]] {
+            let Some(Entity::BSplineCurve(c)) = decode(&cubic_curve(breaks), 22300).unwrap() else {
+                panic!("{breaks:?}")
+            };
+            assert_eq!(c.poles.len(), 7);
+        }
+        for breaks in [&[0.6][..], &[0.75, 0.5], &[0.0], &[0.25, 0.25]] {
+            assert!(decode(&cubic_curve(breaks), 22300).is_err(), "{breaks:?}");
+        }
+    }
+
+    #[test]
+    fn reversed_surface_sense_and_singular_v_boundary_keep_the_chart() {
+        // AutoCAD 22300 files save reversed spline surfaces and V-singular (collapsed) boundaries.
+        let forward = surface();
+        let mut changed = forward.clone();
+        changed.values[1] = AcisValue::Bytes(vec![10]);
+        changed.values[12] = AcisValue::Integer(1.into());
+        let (Some(Entity::BSplineSurface(a)), Some(Entity::BSplineSurface(b))) = (
+            decode(&forward, 22700).unwrap(),
+            decode(&changed, 22300).unwrap(),
+        ) else {
+            panic!()
+        };
+        assert!(!a.reversed && b.reversed);
+        assert_eq!(a.evaluate(0.5, 0.5).unwrap(), b.evaluate(0.5, 0.5).unwrap());
+        let mut curve = cubic_curve(&[]);
+        curve.values[1] = AcisValue::Bytes(vec![10]);
+        assert!(
+            decode(&curve, 22300).is_err(),
+            "reversed curves are not qualified"
+        );
     }
 }

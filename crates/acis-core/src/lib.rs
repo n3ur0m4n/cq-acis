@@ -5,6 +5,7 @@
 //! compatibility with a particular Inventor/ASM version.
 #![doc = include_str!("../README.md")]
 
+pub mod approximation;
 mod asm_nurbs;
 pub mod authoring;
 pub mod encode;
@@ -20,6 +21,27 @@ pub use entities::*;
 pub use geometry::{GeometryError, Vec3};
 pub use num_bigint::BigInt;
 use std::{error::Error, fmt};
+
+/// ASM save versions whose explicit spline, pcurve, subtype and tolerant layouts are qualified.
+/// 22300 is written by AutoCAD 2018+ in DWG (AC1032) modeler entities, with the same field layouts as 22700.
+pub(crate) fn qualified_save_version(version: u32) -> bool {
+    matches!(version, 22300 | 22700)
+}
+
+/// Same check on a model's metadata.
+pub(crate) fn qualified_model(model: &AcisModel) -> bool {
+    model
+        .metadata()
+        .save_version
+        .as_ref()
+        .and_then(|v| v.to_string().parse().ok())
+        .is_some_and(qualified_save_version)
+}
+
+/// Embedded subtype versions saved inside qualified files (22800 and 23100 occur in AutoCAD 22300 files).
+pub(crate) fn qualified_embedded_version(version: usize) -> bool {
+    matches!(version, 22601 | 22800 | 23100)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcisContainer {

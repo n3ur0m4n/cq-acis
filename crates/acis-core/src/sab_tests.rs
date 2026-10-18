@@ -590,3 +590,32 @@ fn explicit_asm_surface_decodes_tensor_order_and_refuses_trailer_changes() {
     periodic.values[9] = I(2.into());
     assert!(crate::asm_nurbs::decode(&periodic, 22700).is_err());
 }
+#[test]
+fn binary_transform_reads_vectors_scale_and_flags() {
+    // ASM SAB transform: three matrix rows and the translation as vectors, then scale and rotate/reflect/shear.
+    let mut fields = Vec::new();
+    for v in [
+        [0.0, 1.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [10.0, 20.0, 30.0],
+    ] {
+        fields.push(20);
+        for x in v {
+            fields.extend_from_slice(&f64::to_le_bytes(x));
+        }
+    }
+    fields.push(6);
+    fields.extend_from_slice(&2.0f64.to_le_bytes());
+    fields.extend_from_slice(&[10, 11, 11]);
+    let doc = parse(&fixture(4, 0, Some(("transform", fields)))).unwrap();
+    let Entity::Transform(t) = &doc.model.entities()[1] else {
+        panic!("{:?}", doc.model.diagnostics())
+    };
+    assert_eq!(
+        t.matrix_values,
+        [0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 10.0, 20.0, 30.0]
+    );
+    assert_eq!(t.scale, 2.0);
+    assert!(t.rotated && !t.reflected && !t.sheared);
+}

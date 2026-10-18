@@ -95,13 +95,15 @@ impl Reader<'_> {
 /// Decode an additive partial view, without changing the model's entity kinds.
 /// `None` means a different entity/version; `Err` means an unqualified layout.
 pub fn decode(raw: &RawEntity, save_version: u32) -> Result<Option<TolerantTopology>, String> {
-    if save_version != 22700 {
+    if !crate::qualified_save_version(save_version) {
         return Ok(None);
     }
     let mut r = Reader {
         values: &raw.values,
         pos: 0,
     };
+    // ASM 22700 ends vertex/edge records with a zero extension field; AutoCAD 22300 files do not.
+    let trailer = save_version != 22300;
     let view = match raw.type_name.as_str() {
         "tvertex-vertex" => {
             let pattern = r.reference()?;
@@ -112,12 +114,16 @@ pub fn decode(raw: &RawEntity, save_version: u32) -> Result<Option<TolerantTopol
             }
             let point = r.reference()?;
             let saved_scalars = [r.number()?, r.number()?, r.number()?];
-            if !(saved_scalars[0] == -1.0 || saved_scalars[0] >= 0.0)
-                || saved_scalars[1..].iter().any(|v| *v < 0.0)
+            // -1 marks an unspecified value (AutoCAD 22300 files also leave the second one unspecified).
+            if saved_scalars[0] != -1.0 && saved_scalars[0] < 0.0
+                || saved_scalars[1] != -1.0 && saved_scalars[1] < 0.0
+                || saved_scalars[2] < 0.0
             {
                 return Err("invalid saved vertex scalar".into());
             }
-            r.zero()?;
+            if trailer {
+                r.zero()?;
+            }
             TolerantTopology::Vertex(TolerantVertex {
                 vertex: VertexEntity {
                     raw: raw.clone(),
@@ -144,10 +150,15 @@ pub fn decode(raw: &RawEntity, save_version: u32) -> Result<Option<TolerantTopol
             };
             let saved_scalar = r.number()?;
             let embedded_version = r.int()?;
-            if saved_scalar < 0.0 || embedded_version != 22601 {
+            // AutoCAD 22300 files save the file version here.
+            let known_version = embedded_version == i64::from(save_version)
+                || usize::try_from(embedded_version).is_ok_and(crate::qualified_embedded_version);
+            if saved_scalar < 0.0 || !known_version {
                 return Err("unqualified tolerant edge profile".into());
             }
-            r.zero()?;
+            if trailer {
+                r.zero()?;
+            }
             TolerantTopology::Edge(TolerantEdge {
                 edge,
                 saved_scalar,
@@ -254,5 +265,50 @@ mod tests {
         }
         raw.values.push(AcisValue::Integer(0.into()));
         assert!(decode(&raw, 22700).is_err());
+    }
+    #[test]
+    fn autocad_22300_profile_has_no_trailer_and_saves_its_own_version() {
+        use AcisValue::{Bytes as B, Float as F, Integer as I, Reference as R, String as S};
+        let mut vertex = RawEntity::new(0, "tvertex-vertex");
+        vertex.values = vec![
+            R(EntityRef(-1)),
+            R(EntityRef(2)),
+            I(0.into()),
+            R(EntityRef(3)),
+            F(-1.0),
+            F(-1.0),
+            F(2.7e-6),
+        ];
+        let Some(TolerantTopology::Vertex(v)) = decode(&vertex, 22300).unwrap() else {
+            panic!()
+        };
+        assert_eq!(v.saved_scalars, [-1.0, -1.0, 2.7e-6]);
+        assert!(
+            decode(&vertex, 22700).is_err(),
+            "22700 requires the trailing zero"
+        );
+        let mut edge = RawEntity::new(1, "tedge-edge");
+        edge.values = vec![
+            R(EntityRef(-1)),
+            R(EntityRef(4)),
+            F(-0.36),
+            R(EntityRef(5)),
+            F(0.0),
+            R(EntityRef(6)),
+            R(EntityRef(7)),
+            B(vec![11]),
+            S("unknown".into()),
+            F(3.9e-4),
+            I(22300.into()),
+        ];
+        let Some(TolerantTopology::Edge(e)) = decode(&edge, 22300).unwrap() else {
+            panic!()
+        };
+        assert_eq!((e.saved_scalar, e.embedded_version), (3.9e-4, 22300));
+        let mut trailer = edge.clone();
+        trailer.values.push(I(0.into()));
+        assert!(decode(&trailer, 22300).is_err());
+        edge.values[10] = I(22301.into());
+        assert!(decode(&edge, 22300).is_err());
     }
 }
