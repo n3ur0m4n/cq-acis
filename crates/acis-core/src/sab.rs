@@ -505,6 +505,14 @@ impl Reader<'_> {
             _ => Err(error(self.offset, "expected finite double")),
         }
     }
+    /// A finite double, or NaN for a value the source does not save (SAT before 500 has no edge parameters).
+    fn optional_number(&mut self) -> Result<Option<f64>> {
+        match self.next()? {
+            Value::Float(v) if v.is_nan() => Ok(None),
+            Value::Float(v) if v.is_finite() => Ok(Some(*v)),
+            _ => Err(error(self.offset, "expected finite double or NaN")),
+        }
+    }
     fn vector(&mut self) -> Result<Vec3> {
         match self.next()? {
             Value::Vec3(v) if v.x.is_finite() && v.y.is_finite() && v.z.is_finite() => Ok(*v),
@@ -635,9 +643,9 @@ fn decode(r: &mut Reader<'_>, raw: RawEntity) -> Result<Option<Entity>> {
             raw,
             pattern: r.reference()?,
             start_vertex: r.reference()?,
-            start_parameter: Some(r.number()?),
+            start_parameter: r.optional_number()?,
             end_vertex: r.reference()?,
-            end_parameter: Some(r.number()?),
+            end_parameter: r.optional_number()?,
             coedge: r.reference()?,
             curve: r.reference()?,
             reversed: r.boolean()?,
